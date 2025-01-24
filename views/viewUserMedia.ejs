@@ -1,0 +1,229 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="content-type" content="text/html; charset=UTF-8">
+<title>view</title>
+<style type="text/css">
+input,button {height: 50px;}
+</style>
+
+</head>
+<body onload="" onresize="">
+<a href="./help">Помощь</a><br><br>
+<div style="display:flex;">
+
+    <input type='button' title="начать съемку" value="начать съёмку" onclick='getMedia()' />
+  
+    <form action="/logout" method="POST">
+      <button class="logout" title="Выйти" type="submit">Выйти</button>
+      <input id="page_csrf" type="hidden" name="_csrf" value="<%=csrfToken%>">
+    </form>
+    
+    <form id="myform" action="/savefile" method="POST" enctype="multipart/form-data">
+      <input name="_csrf" value="<%=csrfToken%>">
+    </form>
+    
+</div>
+<br>
+<a href="./getphotopage">Посмотреть фотографии</a>
+<div>
+<video id='vid' controls autoplay>
+</video>
+<canvas id='canvas' style='border:1px solid green;' width = '' height= '' ></canvas>
+</div>
+<script>
+let Stream;
+let width = 640;
+let height = 480;
+let pixLength = 4;
+let canvas = document.getElementById('canvas');
+let ctx = canvas.getContext('2d');
+let averaging = 2;
+let photoPeriod = 500;
+let checkQueuePeriod = 5000;
+let limit = 10000;
+let queue = [];
+let arrPrev = [];
+let arrDiff = [];
+let diffMax = 10;
+let data;
+let obj={};
+async function getMedia(){
+  await navigator.mediaDevices.getUserMedia(
+    { audio: false, video: true })
+    .then( function(stream){
+    document.getElementById('vid').srcObject = stream;
+    setTimeout(() => {return stream},2000);
+        }, (err) => {console.log("error of stream")} );
+  setInterval( e=>getData(), photoPeriod );
+  //setInterval( e=>checkQueue(queue), checkQueuePeriod );
+  function getData(){
+    width = document.getElementById("vid").clientWidth;
+    height = document.getElementById("vid").clientHeight;
+    canvas.width = width;
+    canvas.height = height;
+    let picture = document.getElementById('vid');
+    ctx.drawImage( picture, 0, 0, width, height );
+    imageData = ctx.getImageData( 0, 0, width, height);
+    data = document.getElementById('canvas').toDataURL('image/jpeg');
+    let arr = [];
+    for(let i=0; i<width; i=i+2){
+      for(let j=0; j<height; j=j+2){
+        let average = (getPix(j,i,1)+getPix(j+1,i,1)+getPix(j,i+1,1)+getPix(j+1,i+1,1))/4;
+        average = average + (getPix(j,i,0)+getPix(j+1,i,0)+getPix(j,i+1,0)+getPix(j+1,i+1,0))/4;
+        average = average + (getPix(j,i,2)+getPix(j+1,i,2)+getPix(j,i+1,2)+getPix(j+1,i+1,2))/4;
+        arr[i*height/2+j/2] = average;
+      }
+    }
+    if(arrPrev.length == 0) {arrPrev = arr;}
+    for(let i=0; i<arr.length; i++){
+      if(arrPrev[i] < arr[i]){
+        diff = Math.abs(arrPrev[i]-arr[i])/arr[i]*100;
+      }else{
+        diff = Math.abs(arr[i] - arrPrev[i])/arrPrev[i]*100;
+      }
+      if(diff > diffMax){arrDiff[arrDiff.length] = diff;}
+    }
+    arrPrev = arr;
+    //console.log(arrDiff.length);
+    if(arrDiff.length > limit){
+      enqueue(data);
+    }
+    arrDiff=[];
+    function getPix(row,column,color){
+      let num = row*width*pixLength+column*pixLength+color;
+      return imageData.data[num];
+    }
+  }
+
+    function uploadPhoto(photo){
+      let formData = new FormData(document.getElementById('myform'));
+      const blob = new Blob([photo],);//{ type: "image/bmp" }
+      blob.filename = 'myname';
+      formData.append( "photo", blob);
+      
+      return ( fetch(`/savefile`, {
+        method: 'POST',
+        body: formData,
+      }));
+    }
+
+    function enqueue(data){
+      queue.push(data);
+    }
+
+    async function checkQueue(queue){
+      while(queue.length != 0){
+        let data = queue.shift();
+        let arr = data.split('');
+        let b = new Blob(arr);
+        let reader = new FileReader();
+        reader.readAsArrayBuffer(b);
+        reader.onloadend = async function (event){//----------------------------- onloadend ------------------------------
+          if (event.target.readyState == FileReader.DONE) {
+            let loaded = event.target.result;
+            console.log('loaded',loaded)
+            let encrypted = await encryptFile(loaded);
+            await uploadPhoto(encrypted);
+          }else{
+            console.log('event',event);
+          }
+        }//----------------------------------------------------------------------- onloadend -----------------------------
+      }
+    }
+  await generate();
+  setInterval( e=>checkQueue(queue), checkQueuePeriod );
+}
+
+//------------------------------------------- encryption -------------------------------------------------------
+
+let keyIv = {};
+
+function create8Buffer(array){
+  let ab = new ArrayBuffer(array.length);
+  let abView = new Uint8Array(ab);
+  abView.set(array,0);
+  return abView;
+}
+
+async function encryptFile(file){//---------------------------------- encryptFile ----------------------------
+
+  const algorithmName = "CBC";
+  const keyType = "raw";
+  const ec = new TextEncoder();
+  let plaintext = file;
+  const aescbcKey = Object.values(keyIv.key);
+  const inVec = Object.values(keyIv.iv);
+
+  let buffKey = create8Buffer(aescbcKey);
+  let iv = create8Buffer(inVec);
+  
+  let key = await crypto.subtle.importKey(keyIv.type, buffKey, 'AES-'+keyIv.name, true, ["encrypt","decrypt"])
+  
+  const ciphertext = await crypto.subtle.encrypt( {
+    name: 'AES-'+keyIv.name,
+    iv,
+  }, key, plaintext )
+  .then(r=>{console.log('encrypt resolved', new Uint8Array(r));return r;},e=>{console.log('encrypt rejected',e);return e;});
+  let encryptedText = new Uint8Array(ciphertext);
+
+  //saveEncrypted(ciphertext);
+  return(new Uint8Array(ciphertext));
+}
+
+async function generate(){//---------------------------------------- generate key -------------------------------------
+
+  const algorithmName = "CBC";
+  const keyType = "raw";
+  const length = 256;
+
+  async function generateAesKey() {
+    const key = await crypto.subtle.generateKey({
+      name: 'AES-'+algorithmName,
+      length
+    }, true, ['encrypt', 'decrypt']);
+
+    return key;
+  }
+  
+  let iv = crypto.getRandomValues(new Uint8Array(16));
+  const key = await generateAesKey()
+  .then((r)=>{console.log('generateAesKey resolved',r);return r;});
+  let ekey = await crypto.subtle.exportKey(keyType,key)
+  .then((r)=>{console.log('exportKey resolved',new Uint8Array(r));return r;});
+  
+  if(keyType == 'raw'){
+    ekey = new Uint8Array(ekey);
+  }else{
+    ekey = ekey;
+  }
+  
+  let otbs = {}
+  otbs.key = ekey;
+  otbs.iv = iv;
+  otbs.name = algorithmName;
+  otbs.type = keyType;
+  otbs.length = length;
+  keyIv = otbs;  
+  saveKey(JSON.stringify(otbs));
+}
+
+function saveKey(string){
+
+  let file = string.split("");
+  let blob = new Blob(file);
+  let url = URL.createObjectURL(blob);
+  let a = document.createElement('a');
+  a.id="reference";
+  document.body.appendChild(a);
+  a.download = "filename";
+  a.href=url;
+  a.click();
+}
+
+//------------------------------------------- encryption -------------------------------------------------------
+
+</script>
+</body>
+</html>

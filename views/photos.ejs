@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<head>
+<meta http-equiv="content-type" content="text/html; charset=UTF-8">
+<title>view pics</title>
+<style type="text/css">
+input,button,files {height: 50px;}
+</style>
+</head>
+<body onload="readKey()" onresize="">
+<div style="display:flex;">
+<input type="file" id="keyOpener" name="keyOpener" title="open key" onchange="readKey()" />
+    <form action="/deletefiles" method="POST">
+      <button class="delete" title="delete files" type="submit">Удалить</button>
+      <input id="page_csrf" type="hidden" name="_csrf" value="<%=csrfToken%>">
+    </form>
+    <form action="/logout" method="POST">
+      <button class="logout" title="sign out" type="submit">Выйти</button>
+      <input id="page_csrf" type="hidden" name="_csrf" value="<%=csrfToken%>">
+    </form>
+</div><br>
+<a href="./help">Помощь</a><br><br>
+<div id='filelist'><%=fileList%></div><br>
+<script>
+let keyIv={};
+async function begin(){
+  let fileList = document.getElementById('filelist').innerHTML;
+  let files = fileList.split(',');
+  for(let i=0; i<files.length; i++){
+    let img = document.createElement('img');
+    let data = await loadFile(files[i]);
+    let decrypted = {};
+    try{
+      decrypted = await decryptFile(data);
+    }
+    catch(TypeError){
+      console.log('error',TypeError)
+    }
+    let arr = new Uint8Array(decrypted);
+    let str = '';//String.fromCharCode(arr);
+    for(let i=0; i<arr.length;i++){
+      str = str + String.fromCharCode(arr[i]);
+    }
+    img.src = str;
+    document.body.appendChild(img);
+  }
+  async function loadFile(filename){
+    let req = new XMLHttpRequest();
+    let pic;
+    req.open('GET','./getphotopage/'+filename,[true]);
+    req.responseType = 'arraybuffer';
+    req.send();
+    return new Promise( (res,rej) => {
+        req.onload = function(){
+          pic = req.response;
+          res(pic);
+          rej('error');
+        }
+
+      }
+    )
+  }
+}
+
+function deleteFiles(){
+  const del = new XMLHttpRequest();
+  del.open("POST","/deletefiles",[true]);
+  del.send();
+  del.onload = () => {};
+}
+
+//------------------------------------------------------------ decryption -------------------------------------
+
+function create8Buffer(array){
+
+  let ab = new ArrayBuffer(array.length);
+
+  let abView = new Uint8Array(ab);
+
+  abView.set(array,0);
+
+  return abView;
+}
+
+async function readKey(opt_startByte, opt_stopByte) {//----------------------------- readKey -------------------------
+  let files = document.getElementById('keyOpener').files;
+  if (!files.length) {
+    alert('Please select a file!');
+    return;
+  }
+  let file = files[0];
+  let start = parseInt(opt_startByte) || 0;
+  let stop = parseInt(opt_stopByte) || file.size - 1;
+  let reader = new FileReader();
+  reader.onloadend = async function(evt) {
+    if (evt.target.readyState == FileReader.DONE) {
+      keyIv = JSON.parse(evt.target.result);
+      const buffKey = create8Buffer(Object.values(keyIv.key));
+      const key = await crypto.subtle.importKey(keyIv.type, buffKey, 'AES-'+keyIv.name, true, ["encrypt","decrypt"]);
+      keyIv.key = key;
+      begin();
+    }
+  };
+  let blob = file.slice(start, stop + 1);
+  reader.readAsBinaryString(blob);
+}
+
+async function decryptFile(file){//----------------------------------- decryptFile -------------------------------------
+
+  const inVec = Object.values(keyIv.iv);
+  let iv = create8Buffer(inVec);
+
+  let decrypted = await crypto.subtle.decrypt( {name: 'AES-'+keyIv.name, iv}, keyIv.key, file )
+  //.then( r=>{return r;},e=>{console.error('decrypt rejected',e);return e;} );
+  return decrypted;
+}
+
+//-------------------------------------------------------------- decryption --------------------------------------
+
+</script>
+
+</body>
+</html>
+
+
